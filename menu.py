@@ -173,7 +173,7 @@ def display_header():
     clear_screen()
     console.print(Panel.fit(
         "[bold blue]PostgreSQL Database Permissions Audit Tool[/bold blue]",
-        subtitle="[italic]Interactive Menu[/italic]"
+        subtitle="[italic]PGaudussy - Copyright 2025 - Interactive Menu[/italic]"
     ))
     console.print()
 
