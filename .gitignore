@@ -1,3 +1,30 @@
-/pg_service.conf
-/backups
-/config
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Local data and logs
+data/
+reports/
+backups/
+
+# Configuration
+pg_service.conf
+
+# IDE files
+.vscode/
+.idea/
+
+# OS specific files
+.DS_Store
+Thumbs.db

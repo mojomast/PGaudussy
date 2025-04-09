@@ -26,39 +26,29 @@ from utils.fixes import PermissionFixer
 def ensure_directories_exist():
     """Ensure that necessary directories exist and create required configuration files."""
     # Create directories
-    directories = ['backups', 'config']
+    directories = [
+        'backups', 
+        'config', 
+        'data', 
+        'data/logs', 
+        'data/audit_results',
+        'reports'  # Keep the original reports directory for backward compatibility
+    ]
+    
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
+        print(f"Ensured directory exists: {directory}")
     
-    # Create config/__init__.py
-    config_init = os.path.join('config', '__init__.py')
-    if not os.path.exists(config_init):
-        with open(config_init, 'w') as f:
-            f.write("# PostgreSQL Database Permissions Audit Tool Configuration\n")
+    # Create default configuration files if they don't exist
+    default_config_files = {
+        'config/dbaudit.conf': '[DEFAULT]\nrisk_level = all\noutput_format = text\n'
+    }
     
-    # Create config/audit_settings.py
-    audit_settings = os.path.join('config', 'audit_settings.py')
-    if not os.path.exists(audit_settings):
-        with open(audit_settings, 'w') as f:
-            f.write("""# PostgreSQL Database Permissions Audit Tool Settings
-
-default_risk_level = "all"
-default_output_format = "text"
-log_results = True
-""")
-    
-    # Create pg_service.conf if it doesn't exist
-    pg_service_conf = 'pg_service.conf'
-    if not os.path.exists(pg_service_conf):
-        with open(pg_service_conf, 'w') as f:
-            f.write("""# PostgreSQL Service Configuration File
-# Format: [service_name]
-#         host=hostname
-#         port=port
-#         dbname=database_name
-#         user=username
-#         password=password (optional)
-""")
+    for file_path, content in default_config_files.items():
+        if not os.path.exists(file_path):
+            with open(file_path, 'w') as f:
+                f.write(content)
+            print(f"Created default configuration file: {file_path}")
 
 # Ensure directories exist at startup
 ensure_directories_exist()
@@ -82,7 +72,8 @@ logging.basicConfig(
 logger = logging.getLogger("dbaudit")
 
 # Also set up file logging
-file_handler = logging.FileHandler("dbaudit_results.log")
+log_file_path = os.path.join("data", "logs", "dbaudit_results.log")
+file_handler = logging.FileHandler(log_file_path)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
@@ -473,47 +464,61 @@ def audit(ctx, output, format, risk_level, summary, focus, verbose):
                         for grantee, privs in table.permissions.items():
                             console.print(f"      {grantee}: {', '.join(privs)}")
         
-        # Export if requested
+        # Save to file if output is specified
         if output:
-            try:
-                # Export report to file
-                with open(output, 'w') as f:
-                    if format == "json":
-                        # Export as JSON
-                        report_data = {
-                            "database": audit_result.database,
-                            "timestamp": datetime.datetime.now().isoformat(),
-                            "roles": [{"name": name, "is_superuser": role.is_superuser} 
-                                     for name, role in audit_result.roles.items()],
-                            "dangerous_permissions": audit_result.dangerous_permissions,
-                            "schemas": [{"name": name, "owner": schema.owner} 
-                                       for name, schema in audit_result.schemas.items()],
-                            "tables": [{"name": name, "owner": table.owner} 
-                                      for name, table in audit_result.tables.items()]
-                        }
-                        json.dump(report_data, f, indent=2)
-                    else:
-                        # Export as text
-                        f.write(f"PostgreSQL Database Permissions Audit Report\n")
-                        f.write(f"Database: {audit_result.database}\n")
-                        f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                        
-                        f.write("SUPERUSER ROLES\n")
-                        f.write("==============\n")
-                        for role_name, role in audit_result.roles.items():
-                            if role.is_superuser:
-                                f.write(f"- {role_name}\n")
-                        
-                        f.write("\nDANGEROUS PERMISSIONS\n")
-                        f.write("====================\n")
-                        for perm in audit_result.dangerous_permissions:
-                            f.write(f"- {perm['type']} {perm['name']}: {perm['privilege']} granted to {perm['grantee']} (Risk: {perm['risk_level']})\n")
-                
-                logger.info(f"Report exported to {output}")
-            except Exception as e:
-                logger.error(f"Failed to export report: {e}")
-                if ctx.obj.get('verbose'):
-                    console.print_exception()
+            output_file = output
+        else:
+            # Generate default filename
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            db_name = audit_result.database or "unknown"
+            if format == "json":
+                output_file = os.path.join("data", "audit_results", f"audit_{db_name}_{timestamp}.json")
+            else:
+                output_file = os.path.join("data", "audit_results", f"audit_{db_name}_{timestamp}.txt")
+        
+        # Create directory if it doesn't exist
+        output_dir = os.path.dirname(output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+            logger.info(f"Created directory: {output_dir}")
+        
+        if format == "json":
+            # Save as JSON
+            report_data = {
+                "database": audit_result.database,
+                "service": ctx.obj.get('service', ''),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "roles": [{"name": name, "is_superuser": role.is_superuser} 
+                         for name, role in audit_result.roles.items()],
+                "dangerous_permissions": audit_result.dangerous_permissions,
+                "schemas": [{"name": name, "owner": schema.owner} 
+                           for name, schema in audit_result.schemas.items()],
+                "tables": [{"name": name, "owner": table.owner} 
+                          for name, table in audit_result.tables.items()]
+            }
+            with open(output_file, "w") as f:
+                json.dump(report_data, f, indent=2)
+        else:
+            # Save as text
+            report_text = f"PostgreSQL Database Permissions Audit Report\n"
+            report_text += f"Database: {audit_result.database}\n"
+            report_text += f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            
+            report_text += "SUPERUSER ROLES\n"
+            report_text += "==============\n"
+            for role_name, role in audit_result.roles.items():
+                if role.is_superuser:
+                    report_text += f"- {role_name}\n"
+            
+            report_text += "\nDANGEROUS PERMISSIONS\n"
+            report_text +=("====================\n")
+            for perm in audit_result.dangerous_permissions:
+                report_text += f"- {perm['type']} {perm['name']}: {perm['privilege']} granted to {perm['grantee']} (Risk: {perm['risk_level']})\n"
+            
+            with open(output_file, "w") as f:
+                f.write(report_text)
+        
+        console.print(f"\n[green]Audit results saved to: {output_file}[/green]")
     
     except Exception as e:
         logger.error(f"Audit failed: {e}")

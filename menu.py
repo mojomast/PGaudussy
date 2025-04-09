@@ -13,7 +13,7 @@ import subprocess
 import configparser
 from dataclasses import dataclass
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime as dt
 
 from rich.console import Console
 from rich.table import Table
@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 
 from pg_service import ServiceConfig
 from utils.backup import BackupManager, BackupInfo
+from utils.reports import ReportGenerator
 
 # Simplified PgServiceConfigParser implementation
 class PgServiceConfigParser:
@@ -110,39 +111,29 @@ def get_available_services():
 def ensure_directories_exist():
     """Ensure that necessary directories exist and create required configuration files."""
     # Create directories
-    directories = ['backups', 'config']
+    directories = [
+        'backups', 
+        'config', 
+        'data', 
+        'data/logs', 
+        'data/audit_results',
+        'reports'  # Keep the original reports directory for backward compatibility
+    ]
+    
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
+        print(f"Ensured directory exists: {directory}")
     
-    # Create config/__init__.py
-    config_init = os.path.join('config', '__init__.py')
-    if not os.path.exists(config_init):
-        with open(config_init, 'w') as f:
-            f.write("# PostgreSQL Database Permissions Audit Tool Configuration\n")
+    # Create default configuration files if they don't exist
+    default_config_files = {
+        'config/dbaudit.conf': '[DEFAULT]\nrisk_level = all\noutput_format = text\n'
+    }
     
-    # Create config/audit_settings.py
-    audit_settings = os.path.join('config', 'audit_settings.py')
-    if not os.path.exists(audit_settings):
-        with open(audit_settings, 'w') as f:
-            f.write("""# PostgreSQL Database Permissions Audit Tool Settings
-
-default_risk_level = "all"
-default_output_format = "text"
-log_results = True
-""")
-    
-    # Create pg_service.conf if it doesn't exist
-    pg_service_conf = 'pg_service.conf'
-    if not os.path.exists(pg_service_conf):
-        with open(pg_service_conf, 'w') as f:
-            f.write("""# PostgreSQL Service Configuration File
-# Format: [service_name]
-#         host=hostname
-#         port=port
-#         dbname=database_name
-#         user=username
-#         password=password (optional)
-""")
+    for file_path, content in default_config_files.items():
+        if not os.path.exists(file_path):
+            with open(file_path, 'w') as f:
+                f.write(content)
+            print(f"Created default configuration file: {file_path}")
 
 # Ensure directories exist at startup
 ensure_directories_exist()
@@ -160,7 +151,8 @@ logging.basicConfig(
 logger = logging.getLogger("dbaudit_menu")
 
 # Also set up file logging
-file_handler = logging.FileHandler("dbaudit_results.log")
+log_file_path = os.path.join("data", "logs", "dbaudit_menu.log")
+file_handler = logging.FileHandler(log_file_path)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
@@ -185,13 +177,15 @@ def display_main_menu():
     console.print("3. Configure Audit Settings")
     console.print("4. View Previous Audit Results")
     console.print("5. Backup and Restore Databases")
-    console.print("6. Exit")
+    console.print("6. Generate HTML Reports")
+    console.print("7. Exit")
     console.print()
     
-    choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "6"], default="1")
+    choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
     return choice
 
 def run_audit_menu():
+    ensure_directories_exist()
     """Menu for running database audits"""
     display_header()
     console.print("[bold]Run Database Audit[/bold]")
@@ -321,6 +315,7 @@ def run_audit_menu():
     Prompt.ask("Press Enter to return to the main menu")
 
 def manage_pg_service_menu():
+    ensure_directories_exist()
     """Menu for managing pg_service.conf"""
     display_header()
     console.print("[bold]Manage pg_service.conf[/bold]")
@@ -402,8 +397,9 @@ def view_services(pg_service_path):
 
 def add_service(pg_service_path):
     """Add a new service to pg_service.conf"""
+    display_header()
+    console.print("[bold]Add New Service[/bold]")
     console.print()
-    console.print("[bold]Add New Service:[/bold]")
     
     # Convert string path to Path object if needed
     if isinstance(pg_service_path, str):
@@ -436,46 +432,66 @@ def add_service(pg_service_path):
     
     # Confirm
     console.print()
-    console.print("[bold]New Service Configuration:[/bold]")
-    console.print(f"Service Name: [cyan]{service_name}[/cyan]")
-    console.print(f"Host: [cyan]{host}[/cyan]")
-    console.print(f"Port: [cyan]{port}[/cyan]")
-    console.print(f"Database: [cyan]{dbname}[/cyan]")
-    console.print(f"Username: [cyan]{user}[/cyan]")
+    console.print(f"[bold]Service Details:[/bold]")
+    console.print(f"Service Name: {service_name}")
+    console.print(f"Host: {host}")
+    console.print(f"Port: {port}")
+    console.print(f"Database: {dbname}")
+    console.print(f"Username: {user}")
+    console.print(f"Password: {'*' * len(password) if password else 'Not set'}")
     console.print()
     
-    if Confirm.ask("Add this service?", default=True):
-        try:
-            # Read existing content
-            content = ""
-            if pg_service_path.exists():
-                with open(pg_service_path, 'r') as f:
-                    content = f.read()
+    if not Confirm.ask("Add this service?", default=True):
+        console.print("[yellow]Service not added.[/yellow]")
+        console.print()
+        Prompt.ask("Press Enter to return to the pg_service.conf menu")
+        return
+    
+    try:
+        # Read existing content
+        content = ""
+        if pg_service_path.exists():
+            with open(pg_service_path, 'r') as f:
+                content = f.read()
+        
+        # Add new service
+        with open(pg_service_path, 'w') as f:
+            f.write(content)
+            if content and not content.endswith('\n\n'):
+                f.write('\n\n')
             
-            # Add new service
-            with open(pg_service_path, 'w') as f:
-                f.write(content)
-                if content and not content.endswith('\n\n'):
-                    f.write('\n\n')
-                
-                f.write(f"[{service_name}]\n")
-                f.write(f"host={host}\n")
-                f.write(f"port={port}\n")
-                f.write(f"dbname={dbname}\n")
-                f.write(f"user={user}\n")
-                f.write(f"password={password}\n")
-                
-                # Add sslmode if not localhost
-                if host != "localhost" and host != "127.0.0.1":
-                    f.write("sslmode=require\n")
+            f.write(f"[{service_name}]\n")
+            f.write(f"host={host}\n")
+            f.write(f"port={port}\n")
+            f.write(f"dbname={dbname}\n")
+            f.write(f"user={user}\n")
+            f.write(f"password={password}\n")
             
-            console.print("[green]Service added successfully![/green]")
-            
-            # Log the action
-            logger.info(f"Added new service: {service_name} for database {dbname} on {host}")
-        except Exception as e:
-            console.print(f"[red]Error adding service: {e}[/red]")
-            logger.error(f"Error adding service: {e}")
+            # Add sslmode if not localhost
+            if host != "localhost" and host != "127.0.0.1":
+                f.write("sslmode=require\n")
+        
+        console.print("[green]Service added successfully![/green]")
+        
+        # Log the action
+        logger.info(f"Added new service: {service_name} for database {dbname} on {host}")
+        
+        # Display the service details
+        console.print()
+        console.print("[bold]Service Details:[/bold]")
+        console.print(f"Service: [cyan]{service_name}[/cyan]")
+        console.print(f"Host: [cyan]{host}[/cyan]")
+        console.print(f"Port: [cyan]{port}[/cyan]")
+        console.print(f"Database: [cyan]{dbname}[/cyan]")
+        console.print(f"Username: [cyan]{user}[/cyan]")
+        console.print("Password: [cyan]********[/cyan]")
+        
+        # Wait for user to acknowledge before returning to the pg_service.conf menu
+        console.print()
+        Prompt.ask("Press Enter to return to the pg_service.conf menu")
+    except Exception as e:
+        console.print(f"[red]Error adding service: {e}[/red]")
+        logger.error(f"Error adding service: {e}")
 
 def edit_service(pg_service_path):
     """Edit an existing service in pg_service.conf"""
@@ -656,6 +672,7 @@ def create_pg_service_conf():
         logger.error(f"Error creating pg_service.conf: {e}")
 
 def configure_audit_settings():
+    ensure_directories_exist()
     """Configure audit settings"""
     display_header()
     console.print("[bold]Configure Audit Settings[/bold]")
@@ -798,13 +815,14 @@ def toggle_logging(settings):
     console.print(f"[green]Result logging {status}[/green]")
 
 def view_previous_results():
+    ensure_directories_exist()
     """View previous audit results"""
     display_header()
     console.print("[bold]View Previous Audit Results[/bold]")
     console.print()
     
     # Check for log file
-    log_file = pathlib.Path("dbaudit_results.log")
+    log_file = pathlib.Path("data/logs/dbaudit_results.log")
     if not log_file.exists():
         console.print("[yellow]No previous audit results found[/yellow]")
         Prompt.ask("Press Enter to return to the main menu")
@@ -867,8 +885,10 @@ def view_result_file(result_files):
     console.print()
     console.print("[bold]Select Result File:[/bold]")
     
-    for i, file in enumerate(result_files, 1):
-        console.print(f"{i}. {file.name}")
+    for i, file in enumerate(result_files):
+        file_name = os.path.basename(file)
+        file_time = dt.fromtimestamp(os.path.getmtime(file)).strftime("%Y-%m-%d %H:%M:%S")
+        console.print(f"{i+1}. {file_name} (Created: {file_time})")
     console.print(f"{len(result_files) + 1}. Cancel")
     console.print()
     
@@ -896,6 +916,7 @@ def view_result_file(result_files):
         console.print(f"[red]Error reading file: {e}[/red]")
 
 def backup_and_restore_menu():
+    ensure_directories_exist()
     """Menu for backup and restore"""
     display_header()
     console.print("[bold]Backup and Restore Databases[/bold]")
@@ -1457,6 +1478,189 @@ def restore_database(same_service=True):
     console.print()
     Prompt.ask("Press Enter to return to the backup and restore menu")
 
+def generate_html_reports():
+    ensure_directories_exist()
+    """Generate HTML reports from audit results using Jinja2"""
+    display_header()
+    console.print("[bold]Generate HTML Reports[/bold]")
+    console.print()
+    
+    # Check for audit result files in the data/audit_results directory
+    result_files = []
+    audit_results_dir = os.path.join("data", "audit_results")
+    
+    # Ensure the directories exist
+    if not os.path.exists(audit_results_dir):
+        os.makedirs(audit_results_dir, exist_ok=True)
+    
+    # Look for audit files in data/audit_results
+    for file in os.listdir(audit_results_dir):
+        if file.startswith("audit_") and (file.endswith(".txt") or file.endswith(".json")):
+            result_files.append(os.path.join(audit_results_dir, file))
+    
+    # Also look for audit files in the root directory (for backward compatibility)
+    for file in os.listdir():
+        if file.startswith("audit_") and (file.endswith(".txt") or file.endswith(".json")):
+            result_files.append(file)
+    
+    # Also look for audit files in the reports directory
+    reports_dir = os.path.join("reports")
+    if os.path.exists(reports_dir):
+        for file in os.listdir(reports_dir):
+            if file.startswith("audit_") and (file.endswith(".txt") or file.endswith(".json")):
+                result_files.append(os.path.join(reports_dir, file))
+    
+    if not result_files:
+        console.print("[yellow]No audit result files found in the data/audit_results directory.[/yellow]")
+        console.print("[yellow]Run an audit first to generate results.[/yellow]")
+        Prompt.ask("Press Enter to return to the main menu")
+        return
+    
+    # Sort files by modification time (newest first)
+    result_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    
+    # Display available audit files
+    console.print("[bold]Available Audit Result Files:[/bold]")
+    for i, file in enumerate(result_files):
+        file_name = os.path.basename(file)
+        file_time = dt.fromtimestamp(os.path.getmtime(file)).strftime("%Y-%m-%d %H:%M:%S")
+        console.print(f"{i+1}. {file_name} (Created: {file_time})")
+    console.print()
+    choice = Prompt.ask("Select a file to generate an HTML report (or 'q' to quit)", default="1")
+    
+    if choice.lower() == 'q':
+        return
+    
+    try:
+        file_index = int(choice) - 1
+        if file_index < 0 or file_index >= len(result_files):
+            console.print("[red]Invalid selection[/red]")
+            Prompt.ask("Press Enter to return to the main menu")
+            return
+        
+        selected_file = result_files[file_index]
+        
+        # Check if it's a JSON file
+        if selected_file.endswith(".json"):
+            # Use the JSON file directly
+            audit_file = selected_file
+        else:
+            # For text files, parse and convert to JSON
+            with open(selected_file, 'r') as f:
+                content = f.read()
+            
+            # Parse text content into structured data
+            json_data = {}
+            current_section = None
+            current_recommendation = {}
+            recommendations = []
+            
+            # Extract database name from filename
+            file_name = os.path.basename(selected_file)
+            db_name_match = re.search(r'audit_([^_]+)', file_name)
+            if db_name_match:
+                json_data["database"] = db_name_match.group(1)
+            
+            # Add timestamp
+            json_data["timestamp"] = dt.now().isoformat()
+            
+            # Parse the text file
+            for line in content.split('\n'):
+                line = line.strip()
+                
+                if line.startswith("Database:"):
+                    json_data["database"] = line.split(":", 1)[1].strip()
+                
+                elif line.startswith("Date:"):
+                    # Already have timestamp
+                    pass
+                
+                elif line == "SUPERUSER ROLES":
+                    current_section = "roles"
+                    json_data["roles"] = []
+                
+                elif line == "DANGEROUS PERMISSIONS":
+                    current_section = "permissions"
+                    json_data["dangerous_permissions"] = []
+                
+                elif line == "RECOMMENDATIONS":
+                    current_section = "recommendations"
+                    json_data["recommendations"] = []
+                
+                elif current_section == "roles" and line.startswith("- "):
+                    role_name = line[2:].strip()
+                    json_data["roles"].append({
+                        "name": role_name,
+                        "is_superuser": True
+                    })
+                
+                elif current_section == "permissions" and line.startswith("- "):
+                    # Parse permission line
+                    # Format: "- TYPE NAME: PRIVILEGE granted to GRANTEE (Risk: LEVEL)"
+                    perm_match = re.search(r'- (\w+) ([^:]+): (\w+) granted to (\w+) \(Risk: (\w+)\)', line)
+                    if perm_match:
+                        obj_type, name, privilege, grantee, risk = perm_match.groups()
+                        json_data["dangerous_permissions"].append({
+                            "type": obj_type,
+                            "name": name.strip(),
+                            "privilege": privilege,
+                            "grantee": grantee,
+                            "risk_level": risk.lower()
+                        })
+                
+                elif current_section == "recommendations" and line.startswith("- "):
+                    # Save previous recommendation if exists
+                    if current_recommendation:
+                        recommendations.append(current_recommendation)
+                        current_recommendation = {}
+                    
+                    # Parse new recommendation
+                    recommendation_text = line[2:].strip()
+                    current_recommendation = {
+                        "title": recommendation_text,
+                        "details": []
+                    }
+                
+                elif current_section == "recommendations" and line.startswith("  "):
+                    # Add detail to current recommendation
+                    if current_recommendation:
+                        current_recommendation["details"].append(line.strip())
+            
+            # Add the last recommendation if exists
+            if current_recommendation:
+                recommendations.append(current_recommendation)
+            
+            if recommendations:
+                json_data["recommendations"] = recommendations
+            
+            # Save as JSON file
+            json_file = os.path.splitext(selected_file)[0] + ".json"
+            with open(json_file, 'w') as f:
+                json.dump(json_data, f, indent=2)
+            
+            audit_file = json_file
+        
+        # Generate HTML report
+        from utils.reports import ReportGenerator
+        report_gen = ReportGenerator(console=console)
+        report_path = report_gen.generate_html_report(audit_file)
+        
+        if report_path:
+            # Ask if user wants to open the report
+            open_report = Prompt.ask("Open the report in your browser?", choices=["y", "n"], default="y")
+            if open_report.lower() == "y":
+                report_gen.open_report(report_path)
+        else:
+            console.print("[red]Failed to generate HTML report[/red]")
+    
+    except Exception as e:
+        console.print(f"[red]Error generating HTML report: {e}[/red]")
+        if "--debug" in sys.argv:
+            console.print_exception()
+    
+    console.print()
+    Prompt.ask("Press Enter to return to the main menu")
+
 def main():
     """Main function for the interactive menu"""
     while True:
@@ -1474,6 +1678,8 @@ def main():
         elif choice == "5":
             backup_and_restore_menu()
         elif choice == "6":
+            generate_html_reports()
+        elif choice == "7":
             console.print("[bold blue]Thank you for using PostgreSQL Database Permissions Audit Tool![/bold blue]")
             sys.exit(0)
 
